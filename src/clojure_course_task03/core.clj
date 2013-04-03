@@ -1,4 +1,5 @@
 (ns clojure-course-task03.core
+  (:require [clojure-course-task03.map-utils])
   (:require [clojure.set]))
 
 (defn join* [table-name conds]
@@ -201,11 +202,25 @@
   
   )
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; TBD: Implement the following macros
-;;
+(defn permissions-var-name [group-name]
+  (str "-" (clojure.string/lower-case group-name) "-permissions"))
 
-(defmacro group [name & body]
+(defn select-fun-name [group-name table-name]
+  (str "select-" (clojure.string/lower-case group-name) "-" table-name))
+
+(defn make-permission-var [group-name [table _-> permission-list]]
+  (assert (= _-> '->))
+  (let [var-name (permissions-var-name group-name)
+        var-symbol (symbol var-name)
+        fun-name (select-fun-name group-name table)
+        fun-symbol (symbol fun-name)
+        fields-vector (vec (map keyword permission-list))]
+     [`(swap! ~var-symbol assoc ~(keyword table) ~fields-vector)
+     `(defn ~fun-symbol [] 
+        (let [~(symbol (str table "-fields-var")) ~fields-vector]
+         (select ~table (~(symbol "fields") :all))))]))
+
+(defmacro group [group-name & body]
   ;; Пример
   ;; (group Agent
   ;;      proposal -> [person, phone, address, price]
@@ -216,17 +231,50 @@
   ;; 3) Создает следующие функции
   ;;    (select-agent-proposal) ;; select person, phone, address, price from proposal;
   ;;    (select-agent-agents)  ;; select clients_id, proposal_id, agent from agents;
-  )
+  `(do 
+     (def ~(symbol (permissions-var-name group-name)) (atom {}))
+     ~@(mapcat #(make-permission-var group-name %) (partition 3 body))))
 
-(defmacro user [name & body]
+
+(defn make-belongs-var [user-name group-name]
+  (let [table-var (gensym "table")
+        fields-var (gensym "fields")]
+       `(reduce merge
+        (for [[~table-var ~fields-var] @~(symbol (permissions-var-name group-name))]
+        {~table-var, ~fields-var}))))
+
+(defn get-user-definitions [user-name [belongs-to & group-names]]
+  (assert (= belongs-to 'belongs-to))
+  (vec (map #(make-belongs-var user-name %) group-names)))
+
+(def ^:dynamic *permissions* (atom {}))
+
+(defn my-concat [x y & zs]
+  (let [result (vec (distinct (apply concat x y zs)))]
+    (if (some #{:all} result)
+    [:all]
+    result)))
+
+(defn deep-merge [input-hash update-hash]
+      (clojure-course-task03.map-utils/deep-merge-with my-concat input-hash update-hash))
+
+(defmacro user [user-name body]
   ;; Пример
   ;; (user Ivanov
   ;;     (belongs-to Agent))
   ;; Создает переменные Ivanov-proposal-fields-var = [:person, :phone, :address, :price]
   ;; и Ivanov-agents-fields-var = [:clients_id, :proposal_id, :agent]
-  )
+  `(do 
+     ~@(map 
+         (fn[x] `(swap! *permissions* deep-merge { (keyword ~(clojure.string/lower-case user-name)) ~x}))
+         (get-user-definitions user-name body))))
 
-(defmacro with-user [name & body]
+(defn get-local-bindings [user-name]
+  (apply concat
+    (for [[table-var fields-var] ((keyword (clojure.string/lower-case user-name)) @*permissions*)]
+    [(symbol (str (name table-var) "-fields-var")) fields-var])))
+
+(defmacro with-user [user-name & body]
   ;; Пример
   ;; (with-user Ivanov
   ;;   . . .)
@@ -236,4 +284,4 @@
   ;;    proposal-fields-var и agents-fields-var.
   ;;    Таким образом, функция select, вызванная внутри with-user, получает
   ;;    доступ ко всем необходимым переменным вида <table-name>-fields-var.
-  )
+  `(let [~@(get-local-bindings user-name)] ~@body))
